@@ -1,119 +1,142 @@
-# calc_logic.py - Funções de Cálculo Crítico para o Agente Mavi.IA
+# calc_logic.py
+# Mavi.IA Framework - Motor de Cálculo de Viabilidade Econômica e Técnica
+# Versão 5.0: Suporte a KPIs de Horas, ROI Detalhado e Múltiplos Drivers de Valor
 
 from typing import Dict, Any
 
-# --- Funções Tool para LangChain ---
-
-def calcula_custo_humano(inputs_bloco_1: Dict[str, Any], CUSTO_FTE_HORAS_MES: int) -> Dict[str, float]:
+def calcula_metricas_genai(inputs_bloco_1: Dict[str, Any], 
+                           inputs_bloco_2: Dict[str, Any], 
+                           inputs_bloco_3: Dict[str, Any],
+                           global_cost_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Calcula o custo mensal humano (C_humano) e a economia em FTE com base nos inputs do Bloco 1.
-    Esta função implementa a Lógica da FASE 1 (AS-IS).
+    Calcula a viabilidade econômica de um projeto de IA Generativa.
+    Retorna métricas financeiras (ROI, Payback) e operacionais (Horas Liberadas).
     """
-    
-    # Extração e conversão de inputs (assumindo que tempo está em minutos)
-    V = inputs_bloco_1["volume_mensal"]
-    T_humano = inputs_bloco_1["tempo_por_unidade_min"]
-    S_hora = inputs_bloco_1["salario_hora_brl"]
 
-    # 1. Cálculo do tempo total economizado (em horas)
-    tempo_total_h_economizado = (V * T_humano) / 60
+    # --- 1. IDENTIFICAÇÃO DO CENÁRIO ---
+    tipo_projeto = inputs_bloco_1.get("tipo_projeto", "automacao")
+    V = inputs_bloco_1.get("volume_mensal", 0) or 0  # Proteção contra None
     
-    # 2. Custo humano por mês (C_humano)
-    C_humano = tempo_total_h_economizado * S_hora
+    # --- 2. CUSTOS DE INFRAESTRUTURA E EXECUÇÃO (TO-BE) ---
+    # A. Infraestrutura Fixa (Ex: Licença n8n, Vector DB)
+    C_infra_fixo = inputs_bloco_2.get("custo_infra_mensal_brl", 0.0) or 0.0
     
-    # 3. Cálculo do FTE (Equivalente de Tempo Integral)
-    FTE_economizado = tempo_total_h_economizado / CUSTO_FTE_HORAS_MES
+    # B. Custos Variáveis (Tokenomics)
+    modelo = inputs_bloco_2.get("modelo_llm", "gemini-2.5-flash")
+    # Tenta pegar custo do modelo, se não achar usa 0.0
+    custos_modelo = global_cost_data["CUSTOS_API_USD"].get(modelo, {"input": 0.0, "output": 0.0})
+    taxa_usd_brl = global_cost_data.get("TAXA_CONVERSAO_BRL_USD", 6.0) or 6.0
     
-    # 4. Impacto Monetizado de Erros Humanos
-    C_erro_unitario = inputs_bloco_1.get("custo_erro_critico_brl_unidade", 0.0)
-    R_erro_humano = inputs_bloco_1.get("risco_erro_humano_percentual", 0.0) / 100
+    tokens_in = inputs_bloco_2.get("tokens_input_por_unidade", 0) or 0
+    tokens_out = inputs_bloco_2.get("tokens_output_por_unidade", 0) or 0
+    
+    # Cálculo: (Tokens * Preço / 1M) * Volume * Câmbio
+    custo_token_unit_usd = ((tokens_in * custos_modelo["input"]) + (tokens_out * custos_modelo["output"])) / 1_000_000
+    custo_token_total_brl = (custo_token_unit_usd * V) * taxa_usd_brl
 
-    # Custo de Risco Humano Mensal Evitado (Economia)
-    C_risco_humano_evitado = V * R_erro_humano * C_erro_unitario
+    # --- 3. CÁLCULO DE VALOR (BENEFÍCIO) ---
     
-    return {
-        "C_humano_mensal_brl": round(C_humano, 2),
-        "horas_economizadas_hh": round(tempo_total_h_economizado, 2),
-        "FTE_economizado": round(FTE_economizado, 3),
-        "C_risco_humano_evitado": round(C_risco_humano_evitado, 2),
-        "tempo_humano_unidade_seg": round(T_humano * 60, 2) # Adicionado T_humano em segundos
-    }
-
-def calcula_custo_ia_e_risco(inputs_bloco_2: Dict[str, Any], inputs_bloco_3: Dict[str, Any], resultados_fase_1: Dict[str, float], global_cost_data: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Calcula o custo total da IA (C_IA) incluindo execução e risco operacional,
-    o ROI bruto e o Score de Viabilidade Técnica (SVT).
-    Esta função implementa as Lógicas das FASES 2 e 3.
-    """
+    C_revisao_humana = 0.0
+    horas_liquidas_liberadas = 0.0
+    metrics = {}
     
-    # --- Dados Reutilizados e Entradas (inputs_bloco_2/3) ---
-    V = inputs_bloco_2["volume_mensal"]
-    C_humano = resultados_fase_1["C_humano_mensal_brl"]
-    C_risco_humano_evitado = resultados_fase_1["C_risco_humano_evitado"]
-    S_hora = inputs_bloco_2["salario_hora_brl"]
-    
-    # Latência e Tempo (Inputs)
-    T_humano_seg = resultados_fase_1["tempo_humano_unidade_seg"]
-    T_ia_seg = inputs_bloco_3.get("tempo_ia_resposta_seg", 0.0) # Novo input: Latência da IA em segundos
-    
-    # --- FASE 2: Custo de Execução (C_exec) ---
-    TAXA = global_cost_data["TAXA_CONVERSAO_BRL_USD"]
-    custo_modelo = global_cost_data["CUSTOS_API_USD"].get(inputs_bloco_2["modelo_llm"])
-    C_ocr_unit = global_cost_data["CUSTOS_BASE_FIXOS_BRL"]["ocr_base_unit_brl"]
-
-    # 1. Custo LLM
-    T_in = inputs_bloco_2["tokens_input_por_unidade"]
-    T_out = inputs_bloco_2["tokens_output_por_unidade"]
-    
-    C_llm_usd = (V * T_in * custo_modelo["input"] + V * T_out * custo_modelo["output"]) / 1_000_000
-    C_llm_brl = C_llm_usd * TAXA
-    
-    # 2. Custo OCR e Hosting
-    C_ocr = V * C_ocr_unit * inputs_bloco_2["paginas_por_unidade"]
-    C_host = inputs_bloco_2["custo_hosting_mensal_brl"]
-    
-    C_exec = C_llm_brl + C_ocr + C_host
-    
-    # --- Risco Operacional (R_op) ---
-    R_erro = inputs_bloco_3["taxa_erro_percentual"] / 100
-    T_rev = inputs_bloco_3["tempo_revisao_min"]
-    R_rev = inputs_bloco_3["taxa_revisao_percentual"] / 100
-    
-    # 1. Custo de Correção Humana (R_op)
-    C_correcao_brl = (V * R_rev) * (T_rev / 60) * S_hora
-    
-    C_IA = C_exec + C_correcao_brl
-    
-    # --- FASE 3: Veredito e Ganhos Não-Monetários ---
-    
-    # 1. Monetização do Ganho Total
-    Ganho_Total = C_humano + C_risco_humano_evitado
-    
-    # 2. ROI (com Risco Monetizado)
-    ROI = ((Ganho_Total - C_IA) / C_IA) * 100
-    
-    # 3. Melhoria de Latência Percentual (Nova Métrica de Eficiência!)
-    if T_humano_seg > 0:
-        Melhoria_Latencia_Perc = ((T_humano_seg - T_ia_seg) / T_humano_seg) * 100
+    if tipo_projeto == "automacao":
+        # === MODO 1: AUTOMAÇÃO (BACKOFFICE) ===
+        # Benefício = Horas que a equipe deixa de gastar fazendo o trabalho manual.
+        
+        T_humano_min = inputs_bloco_1.get("tempo_por_unidade_min", 0) or 0
+        S_hora = inputs_bloco_1.get("salario_hora_brl", 0) or 0
+        
+        # Custo AS-IS (O desperdício atual)
+        horas_totais_as_is = (V * T_humano_min) / 60
+        C_as_is = horas_totais_as_is * S_hora
+        
+        # Custo HITL (Human-in-the-Loop) - O "Imposto" da IA
+        taxa_revisao = inputs_bloco_3.get("taxa_revisao_percentual", 0.0) or 0.0
+        taxa_revisao = taxa_revisao / 100
+        tempo_revisao = inputs_bloco_3.get("tempo_revisao_min", 0.0) or 0.0
+        
+        horas_revisao = (V * taxa_revisao * tempo_revisao) / 60
+        C_revisao_humana = horas_revisao * S_hora
+        
+        # KPI: Horas Liberadas (Horas que gastava antes - Horas que gasta revisando agora)
+        horas_liquidas_liberadas = horas_totais_as_is - horas_revisao
+        
+        Valor_Bruto_Gerado = C_as_is # O valor gerado é a eliminação do custo velho
+        label_valor = "Economia de FTE"
+        label_kpi_horas = "Horas-Homem Liberadas"
+        detalhe_humano = f"Revisão Humana em {taxa_revisao*100:.0f}% dos casos"
+        
     else:
-        Melhoria_Latencia_Perc = 0.0 # Evita divisão por zero
-    
-    # 4. Score de Viabilidade Técnica (SVT - 0 a 100)
-    latencia = Melhoria_Latencia_Perc # Usamos a métrica de eficiência
-    conformidade_score = inputs_bloco_3.get("risco_conformidade_score", 5) # 1 a 5
-    qualidade_ia = (100 - (R_erro * 100)) 
-    
-    # SPV: 40% Qualidade da IA + 40% Eficiência (Latência) + 20% Conformidade
-    SVT = (qualidade_ia * 0.40) + (latencia * 0.40) + (conformidade_score * 4) 
+        # === MODO 2: FAQ / DEFLEXÃO (FRONTOFFICE) ===
+        # Benefício = Tickets que deixam de ser abertos (Deflexão).
+        
+        Custo_Ticket = inputs_bloco_1.get("custo_por_ticket_brl", 0.0) or 0
+        Taxa_Deflexao = inputs_bloco_3.get("taxa_retencao_ia_percentual", 0.0) or 0.0
+        Taxa_Deflexao = Taxa_Deflexao / 100
+        
+        # Custo AS-IS (Se todos os contatos fossem humanos)
+        C_as_is = V * Custo_Ticket
+        
+        # Valor Gerado = Tickets Deflexionados * Custo Unitário
+        Tickets_Deflexionados = V * Taxa_Deflexao
+        Valor_Bruto_Gerado = Tickets_Deflexionados * Custo_Ticket
+        
+        # KPI: Horas Evitadas (Estimativa: Se cada ticket leva 10min, quanto tempo economizamos?)
+        # Assumimos 10 min (0.16h) padrão por ticket se não tivermos dado melhor
+        horas_por_ticket_estimado = 10 / 60 
+        horas_liquidas_liberadas = Tickets_Deflexionados * horas_por_ticket_estimado
+        
+        # Em FAQ, o custo humano geralmente é tratado como "Ticket não resolvido", 
+        # que já foi descontado do Valor Gerado (pois só contamos os deflexionados).
+        # Porém, podemos ter custo de curadoria da base de conhecimento (fixo), mas aqui assumiremos 0 variável.
+        C_revisao_humana = 0.0 
+        
+        label_valor = "Deflexão de Tickets"
+        label_kpi_horas = "Horas de Atendimento Evitadas"
+        detalhe_humano = f"Taxa de Retenção (IA) de {Taxa_Deflexao*100:.0f}%"
 
-    return {
-        "C_exec_brl": round(C_exec, 2),
-        "C_IA_total_brl": round(C_IA, 2),
-        "C_correcao_brl": round(C_correcao_brl, 2),
-        "Ganho_Total_Bruto": round(Ganho_Total, 2),
-        "ROI_total_percentual": round(ROI, 2),
-        "Melhoria_Latencia_Perc": round(Melhoria_Latencia_Perc, 2), # Adicionada!
-        "Score_Viabilidade_Tecnica": round(SVT, 2)
-    }
-
-# --- FIM do calc_logic.py ---
+    # --- 4. CONSOLIDAÇÃO FINAL (ROI & PAYBACK) ---
+    
+    # Custo Total Mensal da Solução IA
+    Custo_Operacional_IA = C_infra_fixo + custo_token_total_brl + C_revisao_humana
+    
+    # Saving Mensal Líquido (Dinheiro que sobra no caixa)
+    Saving_Mensal = Valor_Bruto_Gerado - Custo_Operacional_IA
+    
+    # ROI (%)
+    if Custo_Operacional_IA > 0:
+        ROI = (Saving_Mensal / Custo_Operacional_IA) * 100
+    else:
+        # Se custo é zero (impossível, mas vai que), ROI é infinito se houver ganho
+        ROI = 0.0 if Saving_Mensal <= 0 else 9999.0
+        
+    # Payback (Meses)
+    custo_capex = inputs_bloco_2.get("custo_implementacao_capex_brl", 0.0) or 0.0
+    payback_meses = custo_capex / Saving_Mensal if Saving_Mensal > 0 else 999.0
+    
+    # Montagem do Dicionário de Retorno (Compatível com langchain_agent.py)
+    metrics.update({
+        "as_is": {
+            "custo_total": round(C_as_is, 2),
+            "horas_total": round((V * (inputs_bloco_1.get("tempo_por_unidade_min",0) or 0))/60, 1) if tipo_projeto == "automacao" else 0
+        },
+        "to_be": {
+            "infra": round(C_infra_fixo, 2),
+            "tokens": round(custo_token_total_brl, 2),
+            "humano_hitl": round(C_revisao_humana, 2),
+            "total_ia": round(Custo_Operacional_IA, 2)
+        },
+        "resultado": {
+            "valor_gerado": round(Valor_Bruto_Gerado, 2),     # O Ganho Bruto
+            "saving_liquido": round(Saving_Mensal, 2),        # O Ganho Líquido
+            "roi": round(ROI, 1),
+            "payback": round(payback_meses, 1),
+            "label_valor": label_valor,
+            "horas_liberadas": round(horas_liquidas_liberadas, 1),
+            "label_kpi_horas": label_kpi_horas,
+            "detalhe_humano": detalhe_humano
+        }
+    })
+    
+    return metrics
